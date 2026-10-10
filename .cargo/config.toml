@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "control-flow-guard",
+    "-C", "link-arg=/DYNAMICBASE",
+    "-C", "link-arg=/HIGHENTROPYVA",
+    "-C", "link-arg=/NXCOMPAT",
+    "-C", "link-arg=/CETCOMPAT",
+]

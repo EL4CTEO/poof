@@ -1,0 +1,30 @@
+1 24 "assets/app.manifest"
+1 ICON "assets/app.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040904B0"
+        {
+            VALUE "FileDescription", "Poof - program uninstaller"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "poof"
+            VALUE "OriginalFilename", "poof.exe"
+            VALUE "ProductName", "Poof"
+            VALUE "ProductVersion", "0.1.0"
+            VALUE "LegalCopyright", "MIT License"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x409, 1200
+    }
+}
