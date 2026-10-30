@@ -2,8 +2,8 @@
 1 ICON "assets/app.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,1,5,0
+PRODUCTVERSION 0,1,5,0
 FILEFLAGSMASK 0x3f
 FILEFLAGS 0x0
 FILEOS 0x40004
@@ -15,11 +15,11 @@ FILESUBTYPE 0x0
         BLOCK "040904B0"
         {
             VALUE "FileDescription", "Poof - program uninstaller"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.1.5"
             VALUE "InternalName", "poof"
             VALUE "OriginalFilename", "poof.exe"
             VALUE "ProductName", "Poof"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.1.5"
             VALUE "LegalCopyright", "MIT License"
         }
     }

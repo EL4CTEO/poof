@@ -53,7 +53,10 @@ pub enum UninstallError {
     Rejected(String),
     /// The process could not be started.
     Launch(String),
+    /// The user stopped waiting for the uninstaller (it keeps running).
     Cancelled,
+    /// The UAC prompt for the uninstaller was declined.
+    ElevationCancelled,
 }
 
 impl std::fmt::Display for UninstallError {
@@ -62,6 +65,7 @@ impl std::fmt::Display for UninstallError {
             UninstallError::NoUninstaller => f.write_str("this program has no uninstaller"),
             UninstallError::Rejected(m) | UninstallError::Launch(m) => f.write_str(m),
             UninstallError::Cancelled => f.write_str("cancelled"),
+            UninstallError::ElevationCancelled => f.write_str("administrator rights were declined"),
         }
     }
 }
@@ -242,7 +246,7 @@ fn shell_execute_runas(cmd: &ParsedCommand) -> Result<Option<Handle>, UninstallE
     // SAFETY: all string pointers are NUL-terminated and alive for the call; `info` is a fully initialised struct
     // whose `cbSize` matches its type.
     unsafe { ShellExecuteExW(&mut info) }.map_err(|e| match win32_code(&e) {
-        ERROR_CANCELLED => UninstallError::Cancelled,
+        ERROR_CANCELLED => UninstallError::ElevationCancelled,
         code => launch_error(code),
     })?;
     Ok(Handle::new(info.hProcess))

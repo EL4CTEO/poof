@@ -40,6 +40,7 @@ use crate::leftovers::{Confidence, Leftover};
 use crate::model::InstalledApp;
 use crate::util::{format_size, to_wide};
 
+use super::list;
 use super::theme;
 
 /// The user's choice: indices into the `items` slice passed to [`show`], and the recycle-bin option.
@@ -525,6 +526,8 @@ fn on_create(hwnd: HWND) {
     );
     if let Some(list) = dlg_item(hwnd, ID_LIST) {
         setup_list(list);
+        list::customize_header(list);
+        list::set_font(list, dpi_of(hwnd));
     }
     apply_fonts(hwnd, dpi_of(hwnd));
 }
@@ -691,6 +694,9 @@ fn apply_fonts(hwnd: HWND, dpi: u32) {
         if let Some(item) = dlg_item(hwnd, id) {
             send(item, WM_SETFONT, font.0 as usize, 1);
         }
+    }
+    if let Some(list) = dlg_item(hwnd, ID_LIST) {
+        list::set_font(list, dpi);
     }
 }
 

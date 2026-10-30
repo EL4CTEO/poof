@@ -29,19 +29,19 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, SetFocus, VIRTUAL_KEY, VK_A, VK_APPS, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE,
-    VK_F, VK_F5, VK_F10, VK_RETURN, VK_SHIFT,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY, VK_A, VK_APPS, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_ESCAPE, VK_F, VK_F5, VK_F10, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BN_CLICKED, BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST,
     CBS_HASSTRINGS, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EN_CHANGE, ES_AUTOHSCROLL, FindWindowW, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, HCURSOR, HICON, HMENU, IDC_ARROW, IMAGE_ICON, IsChild, IsIconic, KillTimer, LR_DEFAULTCOLOR,
-    LoadCursorW, LoadImageW, MENU_ITEM_FLAGS, MF_GRAYED, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, MoveWindow,
-    PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON,
-    SPI_GETWORKAREA, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    GetCursorPos, GetMessageW, GetNextDlgTabItem, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, HCURSOR, HICON, HMENU, IDC_ARROW, IMAGE_ICON, IsChild, IsIconic, KillTimer,
+    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MENU_ITEM_FLAGS, MF_GRAYED, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG,
+    MoveWindow, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN,
+    SM_CYSMICON, SPI_GETWORKAREA, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND,
     WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
@@ -199,8 +199,17 @@ impl State {
     }
 
     fn status_texts(&self) -> (String, String) {
+        let total = self.model.total_count();
         let left = if self.scanning {
-            "Loading programs...".to_owned()
+            if total == 0 {
+                "Loading programs...".to_owned()
+            } else {
+                format!("Refreshing... \u{b7} {total} programs")
+            }
+        } else if total == 0 {
+            "No programs found".to_owned()
+        } else if self.model.count() == 0 && self.model.is_filtered() {
+            format!("No matching programs \u{b7} {total} installed")
         } else {
             let count = self.model.count();
             let noun = if count == 1 { "program" } else { "programs" };
@@ -329,6 +338,8 @@ pub fn run() -> i32 {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
     }
+    // Typing should search straight away, without having to click the box first.
+    focus_search(hwnd);
     let code = message_loop();
     if com.is_ok() {
         // SAFETY: balances the successful CoInitializeEx above.
@@ -390,6 +401,10 @@ fn pre_translate(msg: &MSG) -> bool {
         }
         VK_F if ctrl_down() => {
             focus_search(main);
+            true
+        }
+        VK_TAB => {
+            focus_step(main, shift_down());
             true
         }
         _ => false,
@@ -668,6 +683,11 @@ fn on_create(hwnd: HWND) -> bool {
         st.icons = icons;
         st.brushes = Brushes::new();
     });
+    // Nothing is selected yet.
+    // SAFETY: enables or disables our own button.
+    unsafe {
+        let _ = EnableWindow(uninstall, false);
+    }
     layout(hwnd);
     start_scan(hwnd);
     true
@@ -720,6 +740,7 @@ fn layout(hwnd: HWND) {
     }
     move_window(search, pad, top, right - pad, control_h);
     move_window(list, pad, toolbar, w - 2 * pad, h - toolbar - scale(STATUS_H, dpi));
+    list::fit_columns(list, dpi);
 }
 
 fn paint_status(hwnd: HWND) {
@@ -739,11 +760,17 @@ fn paint_status(hwnd: HWND) {
     // SAFETY: valid DC for the paint cycle; the font and objects are restored before EndPaint.
     unsafe {
         FillRect(hdc, &strip, brush);
+        // A hairline separates the list from the status strip.
+        let line = RECT { left: strip.left, top: strip.top, right: strip.right, bottom: strip.top + 1 };
+        let border = solid_brush(p.border);
+        FillRect(hdc, &line, border);
+        let _ = DeleteObject(HGDIOBJ(border.0));
         let old = SelectObject(hdc, HGDIOBJ(theme::ui_font(dpi).0));
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, p.text_dim);
+        SetTextColor(hdc, p.text);
         draw_text(hdc, &mut text_rect, &left, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
         if !right.is_empty() {
+            SetTextColor(hdc, p.text_dim);
             draw_text(hdc, &mut text_rect, &right, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
         }
         SelectObject(hdc, old);
@@ -855,6 +882,7 @@ fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             SendMessageW(control, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
         }
     }
+    list::set_font(controls[5], new_dpi);
     list::rescale_columns(controls[5], old_dpi, new_dpi);
     layout(hwnd);
     // SAFETY: repaint request for our own window.
@@ -930,12 +958,15 @@ fn refresh_view(hwnd: HWND, keep_selection: bool) {
 /// Pushes the model's current view into the ListView and restores the selection.
 fn present(hwnd: HWND, kept: &HashSet<String>) {
     let list = list_of(hwnd);
-    let Some((count, positions, sort)) =
-        with(hwnd, |st| (st.model.count(), st.model.positions_of(kept), st.model.sort))
+    let Some((count, positions, sort, dpi)) =
+        with(hwnd, |st| (st.model.count(), st.model.positions_of(kept), st.model.sort, st.dpi))
     else {
         return;
     };
     list::set_count(list, count);
+    // Changing the row count may add or remove the vertical scrollbar, which changes the width
+    // available to the columns.
+    list::fit_columns(list, dpi);
     list::set_all_selected(list, false);
     for pos in positions {
         list::set_selected(list, pos, true);
@@ -991,6 +1022,7 @@ fn on_search_timer(hwnd: HWND) {
     let query = window_text(search);
     with(hwnd, |st| st.model.set_query(&query));
     refresh_view(hwnd, true);
+    list::scroll_to_top(list_of(hwnd));
 }
 
 fn on_filter_changed(hwnd: HWND) {
@@ -1000,6 +1032,7 @@ fn on_filter_changed(hwnd: HWND) {
     let filter = Filter::from_index(usize::try_from(index).unwrap_or(0));
     with(hwnd, |st| st.model.filter = filter);
     refresh_view(hwnd, true);
+    list::scroll_to_top(list_of(hwnd));
 }
 
 fn focus_search(hwnd: HWND) {
@@ -1008,6 +1041,26 @@ fn focus_search(hwnd: HWND) {
     unsafe {
         let _ = SetFocus(Some(search));
         SendMessageW(search, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+    }
+}
+
+/// Moves the keyboard focus to the next (or previous) control with `WS_TABSTOP`.
+fn focus_step(hwnd: HWND, backward: bool) {
+    // SAFETY: plain focus query; a null handle stands for "no control focused yet".
+    let current = unsafe { GetFocus() };
+    let current = if current.0.is_null() || !unsafe { IsChild(hwnd, current) }.as_bool() {
+        None
+    } else {
+        Some(current)
+    };
+    // SAFETY: GetNextDlgTabItem walks our own child controls in z-order.
+    if let Ok(next) = unsafe { GetNextDlgTabItem(hwnd, current, backward) } {
+        if !next.0.is_null() {
+            // SAFETY: focusing one of our own controls.
+            unsafe {
+                let _ = SetFocus(Some(next));
+            }
+        }
     }
 }
 
@@ -1133,7 +1186,9 @@ fn on_command(hwnd: HWND, wparam: WPARAM) {
 fn on_notify(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
     // SAFETY: WM_NOTIFY passes a valid NMHDR; the larger structures are only read for their codes below.
     let header = unsafe { (lparam.0 as *const NMHDR).as_ref() }?;
-    if header.idFrom != IDC_LIST as usize {
+    // The ListView forwards notifications from its header; those are handled by the list subclass
+    // (owner-drawn cells and column refit), not here.
+    if header.hwndFrom != list_of(hwnd) || header.idFrom != IDC_LIST as usize {
         return None;
     }
     match header.code {
@@ -1170,6 +1225,7 @@ fn on_column_click(hwnd: HWND, sub_item: i32) {
     let Some(column) = Column::from_index(sub_item) else { return };
     with(hwnd, |st| st.model.toggle_sort(column));
     refresh_view(hwnd, true);
+    list::scroll_to_top(list_of(hwnd));
 }
 
 fn right_click(hwnd: HWND, item: i32) {

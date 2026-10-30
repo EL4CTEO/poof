@@ -24,7 +24,7 @@
 
 Tip: for a deeper cleanup, choose **More → Run as administrator**.
 
-Shortcuts: `Ctrl+F` search · `Enter` uninstall · `F5` refresh
+Shortcuts: `Ctrl+F` search · `Enter` uninstall · `F5` refresh · `Tab` move between controls
 
 ## Requirements
 

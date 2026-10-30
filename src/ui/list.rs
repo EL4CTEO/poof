@@ -8,26 +8,33 @@ use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::SetTextColor;
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES};
 use windows::Win32::UI::Controls::{
-    HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT, HDITEMW, HDM_GETITEMW, HDM_SETITEMW, HEADER_CONTROL_FORMAT_FLAGS,
-    LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
-    LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER,
-    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT,
+    HDITEMW, HDM_GETITEMW, HDM_SETITEMW, HDN_ENDTRACKW, HEADER_CONTROL_FORMAT_FLAGS, LIST_VIEW_ITEM_STATE_FLAGS,
+    LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_STATE,
+    LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMSTATE,
+    LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SCROLL, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVSICF_NOSCROLL, LVSIL_SMALL, NMLVDISPINFOW,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVSICF_NOSCROLL, LVSIL_SMALL, NMHEADERW, NMHDR,
+    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMLVDISPINFOW,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SMALLICON, SHGSI_SYSICONINDEX,
-    SHGetFileInfoW, SHGetStockIconInfo, SHSTOCKICONINFO, SIID_APPLICATION,
+    DefSubclassProc, RemoveWindowSubclass, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    SHGSI_SMALLICON, SHGSI_SYSICONINDEX, SHGetFileInfoW, SHGetStockIconInfo, SHSTOCKICONINFO, SIID_APPLICATION,
+    SetWindowSubclass,
 };
-use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, SendMessageW, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
+};
 use windows::core::{PCWSTR, PWSTR, w};
 
 use crate::model::{AppKind, Health, InstalledApp};
 use crate::security::normalize_lexical;
-use crate::ui::theme::scale;
+use crate::ui::theme::{self, scale};
 use crate::util::{format_size, path_to_wide, to_wide};
 
 /// Programs at least this big (known size) match the "Large" filter.
@@ -383,6 +390,16 @@ impl Model {
         self.view.len()
     }
 
+    /// Number of programs known to the last scan, before filtering.
+    pub fn total_count(&self) -> usize {
+        self.apps.len()
+    }
+
+    /// True when a search query or a filter hides part of the list.
+    pub fn is_filtered(&self) -> bool {
+        !self.terms.is_empty() || self.filter != Filter::All
+    }
+
     pub fn set_query(&mut self, query: &str) {
         self.terms = search_terms(query);
     }
@@ -470,6 +487,9 @@ impl Model {
 // ListView plumbing
 // ---------------------------------------------------------------------------
 
+/// Subclass id of the ListView used for header custom draw and column refitting.
+const HEADER_SUBCLASS: usize = 3;
+
 /// One-time configuration of the ListView: extended styles, columns and the shared image list.
 pub fn configure(list: HWND, dpi: u32) -> Icons {
     let style = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP;
@@ -480,7 +500,10 @@ pub fn configure(list: HWND, dpi: u32) -> Icons {
     for column in Column::ALL {
         insert_column(list, column, dpi);
     }
-    Icons::attach(list)
+    let icons = Icons::attach(list);
+    set_font(list, dpi);
+    customize_header(list);
+    icons
 }
 
 fn insert_column(list: HWND, column: Column, dpi: u32) {
@@ -496,6 +519,202 @@ fn insert_column(list: HWND, column: Column, dpi: u32) {
     // SAFETY: `item` and the title buffer outlive the call; the control copies the text.
     unsafe {
         SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(column.index())), Some(LPARAM(&item as *const _ as isize)));
+    }
+}
+
+/// Applies the UI font to a ListView and to its header (so labels and header height scale together).
+pub fn set_font(list: HWND, dpi: u32) {
+    let font = theme::ui_font(dpi);
+    let header = header_of(list);
+    // SAFETY: WM_SETFONT on controls we own; the font lives for the whole process.
+    unsafe {
+        SendMessageW(list, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+        if !header.0.is_null() {
+            SendMessageW(header, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+        }
+    }
+}
+
+/// Width of the area inside the list's border and scrollbars.
+fn client_width(list: HWND) -> i32 {
+    let mut rect = RECT::default();
+    // SAFETY: `rect` is a valid out-parameter.
+    let _ = unsafe { GetClientRect(list, &mut rect) };
+    rect.right - rect.left
+}
+
+fn set_column_width(list: HWND, index: usize, width: i32) {
+    // SAFETY: plain message to a live ListView.
+    unsafe {
+        SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(index)), Some(LPARAM(width.max(0) as isize)));
+    }
+}
+
+/// Widths of every column in logical order.
+fn column_widths(list: HWND) -> [i32; 5] {
+    let mut widths = [0; 5];
+    for (slot, column) in widths.iter_mut().zip(Column::ALL) {
+        *slot = column_width(list, column.index());
+    }
+    widths
+}
+
+/// Makes the columns use the whole width of the list. Name and Publisher are the flexible
+/// columns; the others keep their width, so the last column no longer leaves a large empty strip
+/// on the right when the window is maximised. The current widths act as preferences, which keeps
+/// a layout the user adjusted with the mouse.
+pub fn fit_columns(list: HWND, dpi: u32) {
+    fit_columns_with(list, dpi, None);
+}
+
+/// Same as [`fit_columns`], but keeps the width of the divider the user just dragged.
+pub fn fit_columns_after_drag(list: HWND, dpi: u32, dragged: usize) {
+    fit_columns_with(list, dpi, Some(dragged));
+}
+
+fn fit_columns_with(list: HWND, dpi: u32, dragged: Option<usize>) {
+    let width = client_width(list);
+    if width <= 0 {
+        return;
+    }
+    let mut widths = column_widths(list);
+    if widths.iter().all(|&w| w <= 0) {
+        // The header has not been laid out yet: start from the base widths.
+        for (slot, column) in widths.iter_mut().zip(Column::ALL) {
+            *slot = scale(column.base_width(), dpi);
+        }
+    }
+    let fixed = widths[2] + widths[3] + widths[4];
+    let flex = width - fixed;
+    let min_name = scale(220, dpi);
+    let min_publisher = scale(130, dpi);
+    let (name, publisher) = if flex < min_name + min_publisher {
+        // Too narrow for both minimums: keep them and let the list scroll horizontally.
+        (min_name, min_publisher)
+    } else {
+        let name_pref = widths[0].max(1);
+        let publisher_pref = widths[1].max(1);
+        split_flex(flex, name_pref, publisher_pref, min_name, min_publisher, dragged)
+    };
+    let desired = [name, publisher, widths[2], widths[3], widths[4]];
+    for (index, target) in desired.into_iter().enumerate() {
+        if widths[index] != target {
+            set_column_width(list, index, target);
+        }
+    }
+}
+
+/// Divides `flex` pixels between the two flexible columns, honouring their minimums.
+#[allow(clippy::too_many_arguments)]
+fn split_flex(
+    flex: i32,
+    name_pref: i32,
+    publisher_pref: i32,
+    min_name: i32,
+    min_publisher: i32,
+    dragged: Option<usize>,
+) -> (i32, i32) {
+    match dragged {
+        Some(0) => {
+            let name = name_pref.clamp(min_name, flex - min_publisher);
+            (name, flex - name)
+        }
+        Some(1) => {
+            let publisher = publisher_pref.clamp(min_publisher, flex - min_name);
+            (flex - publisher, publisher)
+        }
+        _ => {
+            let total = i64::from(name_pref) + i64::from(publisher_pref);
+            let name = (i64::from(flex) * i64::from(name_pref) / total)
+                .clamp(i64::from(min_name), i64::from(flex - min_publisher)) as i32;
+            (name, flex - name)
+        }
+    }
+}
+
+/// Empties the view's scroll position (used when the visible rows change completely).
+pub fn scroll_to_top(list: HWND) {
+    // SAFETY: plain message to a live ListView; a large negative delta is clamped to the top.
+    unsafe {
+        SendMessageW(list, LVM_SCROLL, Some(WPARAM(0)), Some(LPARAM(-1_000_000)));
+    }
+}
+
+/// Recolours the header labels and keeps the columns fitted to the list width. The themed dark
+/// header paints its labels in a colour that is nearly invisible on its own background, and
+/// `LVM_SETTEXTCOLOR` does not affect the header: custom draw is the supported hook.
+pub fn customize_header(list: HWND) {
+    let header = header_of(list);
+    if header.0.is_null() {
+        return;
+    }
+    // SAFETY: the subclass is removed in WM_NCDESTROY of the list window; `header` stays valid for the
+    // life of the ListView.
+    unsafe {
+        let _ = SetWindowSubclass(list, Some(header_proc), HEADER_SUBCLASS, header.0 as usize);
+    }
+}
+
+/// Handles the header's custom draw and the end of a column resize.
+///
+/// # Safety
+/// Called only by the system (comctl32 subclass chain) on the UI thread.
+unsafe extern "system" fn header_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    data: usize,
+) -> LRESULT {
+    if msg == WM_NOTIFY {
+        // SAFETY: WM_NOTIFY passes a valid NMHDR, or a larger struct that starts with one.
+        if let Some(nm) = unsafe { (lparam.0 as *const NMHDR).as_ref() } {
+            if nm.hwndFrom.0 as usize == data {
+                if nm.code == NM_CUSTOMDRAW {
+                    // SAFETY: the header sends NM_CUSTOMDRAW with an NMCUSTOMDRAW for the duration of the call.
+                    if let Some(draw) = unsafe { (lparam.0 as *mut NMCUSTOMDRAW).as_mut() } {
+                        if draw.dwDrawStage.0 == CDDS_PREPAINT.0 {
+                            return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+                        }
+                        if draw.dwDrawStage.0 == CDDS_ITEMPREPAINT.0 {
+                            // SAFETY: `draw.hdc` is the device context the header is painting into.
+                            unsafe {
+                                SetTextColor(draw.hdc, theme::palette().text);
+                            }
+                            return LRESULT(CDRF_NEWFONT as isize);
+                        }
+                    }
+                    return LRESULT(0);
+                }
+                if nm.code == HDN_ENDTRACKW {
+                    // SAFETY: HDN_ENDTRACK carries an NMHEADERW whose iItem is the dragged divider.
+                    let dragged = unsafe { (lparam.0 as *const NMHEADERW).as_ref() }
+                        .and_then(|header| usize::try_from(header.iItem).ok());
+                    let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                    if let Some(column) = dragged {
+                        fit_columns_after_drag(hwnd, dpi_of(hwnd), column);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    if msg == WM_NCDESTROY {
+        // SAFETY: removes our own subclass during the control's final message.
+        unsafe {
+            let _ = RemoveWindowSubclass(hwnd, Some(header_proc), HEADER_SUBCLASS);
+        }
+    }
+    // SAFETY: passes the untouched message down the subclass chain.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+fn dpi_of(hwnd: HWND) -> u32 {
+    // SAFETY: a stale handle just yields 0.
+    match unsafe { GetDpiForWindow(hwnd) } {
+        0 => 96,
+        dpi => dpi,
     }
 }
 

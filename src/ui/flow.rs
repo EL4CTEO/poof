@@ -127,6 +127,20 @@ fn uninstall_app(owner: HWND, app: &InstalledApp, quiet: bool) -> bool {
         Some(Ok(outcome)) => outcome,
         // The user stopped waiting. The uninstaller keeps running; nothing more happens for this app.
         Some(Err(UninstallError::Cancelled)) => return false,
+        // Declining the UAC prompt is otherwise silent, which looks like nothing happened.
+        Some(Err(UninstallError::ElevationCancelled)) => {
+            dialogs::message_box(
+                owner,
+                TITLE,
+                &format!(
+                    "Administrator rights were declined, so {} was not uninstalled.\n\n\
+                     Try again and accept the prompt, or choose More > Run as administrator first.",
+                    app.name
+                ),
+                Icon::Warning,
+            );
+            return false;
+        }
         Some(Err(err)) => {
             show_uninstall_error(owner, app, &err);
             return false;
